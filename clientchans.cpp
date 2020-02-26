@@ -23,16 +23,17 @@
 #include <znc/Nick.h>
 #include <znc/version.h>
 
-#if (VERSION_MAJOR < 1) || (VERSION_MAJOR == 1 && VERSION_MINOR < 6)
-#error The clientchans module requires ZNC version 1.6.0 or later.
+#if (VERSION_MAJOR < 1) || (VERSION_MAJOR == 1 && VERSION_MINOR < 7)
+#error The clientchans module requires ZNC version 1.7.0 or later.
 #endif
 
 class CClientChansMod : public CModule {
   public:
 	MODCONSTRUCTOR(CClientChansMod) { Initialize(); }
 
-	virtual EModRet OnUserRaw(CString& line) override;
-	virtual EModRet OnSendToClient(CString& line, CClient& client) override;
+	virtual EModRet OnUserJoinMessage(CJoinMessage& Message) override;
+	virtual EModRet OnUserPartMessage(CPartMessage& Message) override;
+	virtual EModRet OnSendToClientMessage(CMessage& Message) override;
 	virtual void OnClientDisconnect() override;
 
   private:
@@ -74,95 +75,100 @@ void CClientChansMod::Initialize() {
 	}
 }
 
-CModule::EModRet CClientChansMod::OnUserRaw(CString& line) {
+CModule::EModRet CClientChansMod::OnUserJoinMessage(CJoinMessage& Message) {
 	CIRCNetwork* pNetwork = GetNetwork();
-	const CString sCommand = line.Token(0);
 	CClient* pClient = GetClient();
-	DEBUGLOG("[" + pClient->GetIdentifier() + "]< " + line);
+	DEBUGLOG("[" + pClient->GetIdentifier() + "]< " + Message.ToString());
 
-	if (sCommand.Equals("JOIN")) {
-		// 1. ZNC is not in a channel.
-		//    -> Join the channel.
-		//       The server's JOIN reply should only be sent to the requesting client.
-		// 2. ZNC is already in a channel.
-		//    -> Attach this client (only) to the channel.
-		//       ZNC's fake JOIN reply should only be sent to the requesting client.
+	// 1. ZNC is not in a channel.
+	//    -> Join the channel.
+	//       The server's JOIN reply should only be sent to the requesting client.
+	// 2. ZNC is already in a channel.
+	//    -> Attach this client (only) to the channel.
+	//       ZNC's fake JOIN reply should only be sent to the requesting client.
 
-		const CString sChannelName = line.Token(1);
-		// TODO: normalize channel name
-		SetChannelVisible(pClient, sChannelName, true);
-		CChan* pChannel = pNetwork->FindChan(sChannelName);
-		if (pChannel) {
-			pChannel->AttachUser(pClient);
-			return HALT;
-		}
-	} else if (sCommand.Equals("PART")) {
-		const CString sChannelName = line.Token(1);
-		// TODO: normalize channel name
-
-		return OnClientLeftChannel(sChannelName);
+	const CString sChannelName = Message.GetTarget();
+	// TODO: normalize channel name
+	SetChannelVisible(pClient, sChannelName, true);
+	CChan* pChannel = pNetwork->FindChan(sChannelName);
+	if (pChannel) {
+		pChannel->AttachUser(pClient);
+		return HALT;
 	}
 
 	return CONTINUE;
 }
 
-CModule::EModRet CClientChansMod::OnSendToClient(CString& line, CClient& client) {
-	DEBUGLOG("[" + client.GetIdentifier() + "]> " + line);
+CModule::EModRet CClientChansMod::OnUserPartMessage(CPartMessage& Message) {
+	const CString sChannelName = Message.GetTarget();
+	// TODO: normalize channel name
+	CClient* pClient = GetClient();
+	DEBUGLOG("[" + pClient->GetIdentifier() + "]< " + Message.ToString());
+
+	return OnClientLeftChannel(sChannelName);
+}
+
+CModule::EModRet CClientChansMod::OnSendToClientMessage(CMessage& Message) {
+	CClient* pClient = Message.GetClient();
+	DEBUGLOG("[" + pClient->GetIdentifier() + "]> " + Message.ToString());
 	EModRet result = CONTINUE;
-	CIRCNetwork* pNetwork = client.GetNetwork();
+	CIRCNetwork* pNetwork = GetNetwork();
 
-	if (pNetwork) {
-		// discard message tags
-		CString msg = line;
-		if (msg.StartsWith("@"))
-			msg = msg.Token(1, true);
+	const CNick& Nick = Message.GetNick();
+	const CString& sCommand = Message.GetCommand();
 
-		const CNick sNick(msg.Token(0).TrimPrefix_n());
-		const CString sCommand = msg.Token(1);
-		const CString sRest = msg.Token(2, true);
-
-		// Identify the channel token from (possibly) channel specific messages
-		CString sChannelName;
-		if (sCommand.length() == 3 && isdigit(sCommand[0]) && isdigit(sCommand[1]) && isdigit(sCommand[2])) {
-			// Must block the following numeric replies that are automatically sent on attach:
-			// RPL_NAMREPLY, RPL_ENDOFNAMES, RPL_TOPIC, RPL_TOPICWHOTIME...
-			unsigned int num = sCommand.ToUInt();
-			switch (num) {
+	// Identify the channel token from (possibly) channel specific messages
+	CString sChannelName;
+	switch (Message.GetType()) {
+		case CMessage::Type::Text:
+		case CMessage::Type::CTCP:
+		case CMessage::Type::Action:
+		case CMessage::Type::Notice:
+		case CMessage::Type::Join:
+		case CMessage::Type::Part:
+		case CMessage::Type::Mode:
+		case CMessage::Type::Kick:
+		case CMessage::Type::Topic:
+			sChannelName = Message.GetParam(0);
+			break;
+		case CMessage::Type::Numeric: {
+			unsigned int nCommand = sCommand.ToUInt();
+			switch (nCommand) {
 				case 332:  // RPL_TOPIC
 				case 333:  // RPL_TOPICWHOTIME
 				case 366:  // RPL_ENDOFNAMES
-					sChannelName = sRest.Token(1);
+					sChannelName = Message.GetParam(1);
 					break;
 				case 353:  // RPL_NAMREPLY
-					sChannelName = sRest.Token(2);
+					sChannelName = Message.GetParam(2);
 					break;
 				case 322:  // RPL_LIST
 				default:
 					return CONTINUE;
 			}
-		} else if (sCommand.Equals("PRIVMSG") || sCommand.Equals("NOTICE") || sCommand.Equals("JOIN") ||
-		           sCommand.Equals("PART") || sCommand.Equals("MODE") || sCommand.Equals("KICK") ||
-		           sCommand.Equals("TOPIC")) {
-			sChannelName = sRest.Token(0).TrimPrefix_n(":");
-		} else {
+			break;
+		}
+		default:
 			return CONTINUE;
-		}
-
-		// Remove status prefix (#1)
-		CIRCSock* pSock = client.GetIRCSock();
-		if (pSock)
-			sChannelName.TrimLeft(pSock->GetISupport("STATUSMSG", ""));
-
-		// Filter out channel specific messages for hidden channels
-		if (pNetwork->IsChan(sChannelName) && !IsChannelVisible(&client, sChannelName)) {
-			DEBUGLOG("  (filtered)");
-			result = HALTCORE;
-		}
-
-		// For a server PART reply, clear the visibility status after the PART was relayed.
-		if (sCommand.Equals("PART") && sNick.GetNick().Equals(client.GetNick()))
-			SetChannelVisible(&client, sChannelName, false);
 	}
+
+	DEBUGLOG("  Extracted channel name: " + sChannelName);
+
+	// Remove status prefix (#1)
+	CIRCSock* pSock = pClient->GetIRCSock();
+	if (pSock)
+		sChannelName.TrimLeft(pSock->GetISupport("STATUSMSG", ""));
+
+	// Filter out channel specific messages for hidden channels
+	if (pNetwork->IsChan(sChannelName) && !IsChannelVisible(pClient, sChannelName)) {
+		DEBUGLOG("  (filtered)");
+		result = HALTCORE;
+	}
+
+	// For a server PART reply, clear the visibility status after the PART was relayed.
+	if (sCommand.Equals("PART") && Nick.GetNick().Equals(pClient->GetNick()))
+		SetChannelVisible(pClient, sChannelName, false);
+
 	return result;
 }
 
