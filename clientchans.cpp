@@ -179,9 +179,9 @@ void CClientChansMod::OnClientDisconnect() {
 	// Make sure to forget disconnecting clients to
 	// 1) prevent dangling pointers
 	// 2) part channels without any clients left.
-	for (auto it = m_channelClients.begin(); it != m_channelClients.end(); ++it) {
-		const CString& sChannelName = it->first;
-		auto pChannelClients = &it->second;
+	for (auto& pair : m_channelClients) {
+		const CString& sChannelName = pair.first;
+		auto pChannelClients = &pair.second;
 
 		if (pChannelClients->find(pClient) == pChannelClients->end())
 			continue;
@@ -211,11 +211,12 @@ CModule::EModRet CClientChansMod::OnClientLeftChannel(const CString& sChannelNam
 
 	bool bHaveOtherClients = false;
 	auto pChannelClients = &m_channelClients[sChannelName];
-	for (std::set<CClient*>::const_iterator it = pChannelClients->begin(); it != pChannelClients->end(); ++it)
-		if (*it != pClient) {
+	for (CClient* pOtherClient : *pChannelClients) {
+		if (pClient != pOtherClient) {
 			bHaveOtherClients = true;
 			break;
 		}
+	}
 
 	// Case 1
 	if (bHaveOtherClients) {
